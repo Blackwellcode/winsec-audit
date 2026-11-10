@@ -44,6 +44,28 @@ Downloaded the ZIP instead of cloning? Windows marks it as coming from the inter
 
 Each check reports `Pass`, `Warn`, `Fail`, `Info`, `Skipped` or `Error`, with evidence and a suggested fix. The **score** is the weighted share of passed checks (Warn counts half; Info/Skipped/Error are not scored). It is a heuristic, not a certification.
 
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph Script["winsec-audit.ps1"]
+        C["44 × Invoke-Check<br/>-RequiresAdmin, -DeepOnly"] --> F["Findings<br/>Pass · Warn · Fail · Info · Skipped · Error"]
+        F --> W["Write-Report"]
+    end
+    N["Native allowlist<br/>tpmtool · winget · dism · sfc"] -->|fixed arguments| C
+    W --> MD["report.md"]
+    W --> JS["report.json"]
+    subgraph CI["GitHub Actions: Windows PowerShell 5.1 and PowerShell 7"]
+        G1["PSScriptAnalyzer"]
+        G2["AST read-only guard"]
+        G3["Guard self-test"]
+        G4["State fingerprint smoke test"]
+    end
+    CI -.->|every commit| Script
+```
+
+Each check runs on its own: an exception becomes an `Error` finding for that check, and the run continues.
+
 ## Why you can trust "read-only"
 
 1. **Static guard** (`tests/Test-ReadOnly.ps1`) parses the script's AST and fails if it finds:
