@@ -27,15 +27,16 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
+    # step-level "shell" does not accept the matrix context; job defaults do
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v4
       - name: Read-only guard
-        shell: ${{ matrix.shell }}
         run: ./tests/Test-ReadOnly.ps1
       - name: Guard self-test
-        shell: ${{ matrix.shell }}
         run: ./tests/Test-GuardSelf.ps1
       - name: Smoke test (state fingerprint)
-        shell: ${{ matrix.shell }}
         # hosted runners are VMs: a few platform checks (TPM, Device Guard) may not be queryable there
         run: ./tests/Test-Smoke.ps1 -MaxErrors 3
