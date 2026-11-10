@@ -64,6 +64,7 @@ $problems = New-Object System.Collections.Generic.List[string]
 
 try {
     # control window: same snapshot twice without the audit, to see background drift of the machine itself
+    $testStart = Get-Date
     $control0 = Get-StateFingerprint
     $control1 = Get-StateFingerprint
     $drift = Get-Diff $control0 $control1
@@ -71,8 +72,10 @@ try {
     $beforeParts = $control1
     $auditArgs = @{ OutputPath = $out; Quiet = $true }
     if (-not $WithWinget) { $auditArgs['SkipWinget'] = $true }
+    $auditStart = Get-Date
     & $audit @auditArgs
     $exit = $LASTEXITCODE
+    $auditEnd = Get-Date
     $afterParts = Get-StateFingerprint
     $before = Get-Hash $beforeParts; $after = Get-Hash $afterParts
 
@@ -82,6 +85,17 @@ try {
         $diff = Get-Diff $beforeParts $afterParts
         $problems.Add("system state changed during the audit ($($diff.Count) line(s)):")
         foreach ($d in $diff) { $problems.Add("    $d") }
+        # forensics: who made the change? (read-only event queries)
+        Write-Host 'Events since test start (System 7040 start type, TaskScheduler 140/142):' -ForegroundColor Yellow
+        Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7040; StartTime = $testStart } -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.TimeCreated.ToString('HH:mm:ss')) 7040 user=$($_.UserId) $($_.Message -replace '\s+', ' ')" -ForegroundColor Yellow }
+        $tsLog = Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational' -ErrorAction SilentlyContinue
+        if ($tsLog -and $tsLog.IsEnabled) {
+            Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 140, 142; StartTime = $testStart } -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "  $($_.TimeCreated.ToString('HH:mm:ss')) $($_.Id) user=$($_.UserId) $($_.Message -replace '\s+', ' ')" -ForegroundColor Yellow }
+        }
+        else { Write-Host '  TaskScheduler/Operational log is disabled on this machine.' -ForegroundColor Yellow }
+        Write-Host "  audit window: $($auditStart.ToString('HH:mm:ss'))-$($auditEnd.ToString('HH:mm:ss'))" -ForegroundColor Yellow
     }
 
     $dir = @(Get-ChildItem -LiteralPath $out -Directory) | Select-Object -First 1
