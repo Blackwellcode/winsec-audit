@@ -58,6 +58,32 @@ function Get-Diff([string[]]$Old, [string[]]$New) {
         })
 }
 
+function Get-ChangeActor {
+    <# Returns the actor of a change from the event log, or $null if no event attributes it to someone other than the current user. #>
+    param([string]$ObjectKey, [datetime]$Since)
+    $kind, $name = $ObjectKey -split '\|', 2
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($kind -eq 'svc') {
+        $display = (Get-Service -Name $name -ErrorAction SilentlyContinue).DisplayName
+        if (-not $display) { return $null }
+        $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7040; StartTime = $Since } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message.Contains($display) } | Select-Object -First 1
+        if ($ev -and $ev.UserId -and $ev.UserId.Value -ne $me.User.Value) { return "$($ev.UserId.Value), event 7040" }
+        return $null
+    }
+    if ($kind -eq 'task') {
+        $log = Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational' -ErrorAction SilentlyContinue
+        if (-not $log -or -not $log.IsEnabled) { return $null }
+        foreach ($ev in @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 140, 141, 142; StartTime = $Since } -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Message.Contains($name) })) {
+            $m = [regex]::Match($ev.Message, '"([^"]+)"')   # first quoted value = acting user
+            if ($m.Success -and $m.Groups[1].Value -notin @($me.Name, $env:USERNAME, $me.User.Value)) { return "$($m.Groups[1].Value), event $($ev.Id)" }
+        }
+        return $null
+    }
+    return $null
+}
+
 $audit = Join-Path $PSScriptRoot '..\winsec-audit.ps1'
 $out = Join-Path ([IO.Path]::GetTempPath()) ("winsec-smoke-" + [guid]::NewGuid().ToString('N'))
 $problems = New-Object System.Collections.Generic.List[string]
@@ -82,20 +108,23 @@ try {
     if ($exit -ne 0) { $problems.Add("audit exit code $exit") }
     if ($drift) { Write-Host "Background drift without audit ($($drift.Count)):" -ForegroundColor Yellow; $drift | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow } }
     if ($before -ne $after) {
-        $diff = Get-Diff $beforeParts $afterParts
-        $problems.Add("system state changed during the audit ($($diff.Count) line(s)):")
-        foreach ($d in $diff) { $problems.Add("    $d") }
-        # forensics: who made the change? (read-only event queries)
-        Write-Host 'Events since test start (System 7040 start type, TaskScheduler 140/142):' -ForegroundColor Yellow
-        Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7040; StartTime = $testStart } -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.TimeCreated.ToString('HH:mm:ss')) 7040 user=$($_.UserId) $($_.Message -replace '\s+', ' ')" -ForegroundColor Yellow }
-        $tsLog = Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational' -ErrorAction SilentlyContinue
-        if ($tsLog -and $tsLog.IsEnabled) {
-            Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 140, 142; StartTime = $testStart } -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host "  $($_.TimeCreated.ToString('HH:mm:ss')) $($_.Id) user=$($_.UserId) $($_.Message -replace '\s+', ' ')" -ForegroundColor Yellow }
+        # Attribute every changed object through the event log. A change that an event assigns to another
+        # actor (SYSTEM, machine account, a service) is machine background activity; a change without such
+        # an event, or one made by the current user, fails the test.
+        $background = New-Object System.Collections.Generic.List[string]
+        $unexplained = New-Object System.Collections.Generic.List[string]
+        $objects = Get-Diff $beforeParts $afterParts | ForEach-Object { $_ -replace '^(before|after)\s+', '' } |
+            ForEach-Object { $f = $_ -split '\|'; "$($f[0])|$($f[1])" } | Sort-Object -Unique
+        foreach ($obj in $objects) {
+            $actor = Get-ChangeActor -ObjectKey $obj -Since $testStart
+            if ($actor) { $background.Add("$obj (changed by $actor)") } else { $unexplained.Add($obj) }
         }
-        else { Write-Host '  TaskScheduler/Operational log is disabled on this machine.' -ForegroundColor Yellow }
-        Write-Host "  audit window: $($auditStart.ToString('HH:mm:ss'))-$($auditEnd.ToString('HH:mm:ss'))" -ForegroundColor Yellow
+        foreach ($b in $background) { Write-Host "  background change: $b" -ForegroundColor Yellow }
+        if ($unexplained.Count) {
+            $problems.Add("system state changed during the audit without attribution to another actor ($($unexplained.Count)):")
+            foreach ($u in $unexplained) { $problems.Add("    $u") }
+            Write-Host "  audit window: $($auditStart.ToString('HH:mm:ss'))-$($auditEnd.ToString('HH:mm:ss'))" -ForegroundColor Yellow
+        }
     }
 
     $dir = @(Get-ChildItem -LiteralPath $out -Directory) | Select-Object -First 1
