@@ -33,6 +33,9 @@ jobs:
         shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v5
+      - name: Enable TaskScheduler log (CI VM only, for smoke-test forensics)
+        shell: powershell
+        run: wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
       - name: Read-only guard
         run: ./tests/Test-ReadOnly.ps1
       - name: Guard self-test
