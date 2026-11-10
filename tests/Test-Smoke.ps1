@@ -41,10 +41,21 @@ function Get-StateFingerprint {
         if (Test-Path -LiteralPath $r[0]) { $v = (Get-Item -LiteralPath $r[0]).GetValue($r[1]) }
         $parts.Add("reg|$($r[0])|$($r[1])|$v")
     }
-    $bytes = [Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+    return , $parts.ToArray()
+}
+
+function Get-Hash([string[]]$Parts) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($Parts -join "`n"))
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '' }
     finally { $sha.Dispose() }
+}
+
+function Get-Diff([string[]]$Old, [string[]]$New) {
+    @(Compare-Object -ReferenceObject $Old -DifferenceObject $New | ForEach-Object {
+            $side = if ($_.SideIndicator -eq '<=') { 'before' } else { 'after ' }
+            "$side $($_.InputObject)"
+        })
 }
 
 $audit = Join-Path $PSScriptRoot '..\winsec-audit.ps1'
@@ -52,15 +63,26 @@ $out = Join-Path ([IO.Path]::GetTempPath()) ("winsec-smoke-" + [guid]::NewGuid()
 $problems = New-Object System.Collections.Generic.List[string]
 
 try {
-    $before = Get-StateFingerprint
+    # control window: same snapshot twice without the audit, to see background drift of the machine itself
+    $control0 = Get-StateFingerprint
+    $control1 = Get-StateFingerprint
+    $drift = Get-Diff $control0 $control1
+
+    $beforeParts = $control1
     $auditArgs = @{ OutputPath = $out; Quiet = $true }
     if (-not $WithWinget) { $auditArgs['SkipWinget'] = $true }
     & $audit @auditArgs
     $exit = $LASTEXITCODE
-    $after = Get-StateFingerprint
+    $afterParts = Get-StateFingerprint
+    $before = Get-Hash $beforeParts; $after = Get-Hash $afterParts
 
     if ($exit -ne 0) { $problems.Add("audit exit code $exit") }
-    if ($before -ne $after) { $problems.Add("system state changed during the audit (fingerprint $before -> $after)") }
+    if ($drift) { Write-Host "Background drift without audit ($($drift.Count)):" -ForegroundColor Yellow; $drift | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow } }
+    if ($before -ne $after) {
+        $diff = Get-Diff $beforeParts $afterParts
+        $problems.Add("system state changed during the audit ($($diff.Count) line(s)):")
+        foreach ($d in $diff) { $problems.Add("    $d") }
+    }
 
     $dir = @(Get-ChildItem -LiteralPath $out -Directory) | Select-Object -First 1
     if (-not $dir) { throw 'No report folder written.' }
