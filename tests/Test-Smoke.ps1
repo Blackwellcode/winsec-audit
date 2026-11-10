@@ -1,0 +1,98 @@
+<#
+.SYNOPSIS
+    Runs the audit and proves at runtime that it changed nothing.
+
+.DESCRIPTION
+    1. Fingerprints security-relevant state (firewall rules, services, Defender preferences,
+       key registry values, scheduled tasks).
+    2. Runs winsec-audit.ps1 into a temp folder.
+    3. Fingerprints again and requires an identical hash.
+    4. Validates report.json (schema, score range, check count, no Error results).
+#>
+[CmdletBinding()]
+param(
+    [int]$MaxErrors = 0,
+    [switch]$WithWinget
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+function Get-StateFingerprint {
+    $parts = New-Object System.Collections.Generic.List[string]
+    Get-NetFirewallRule | Sort-Object Name | ForEach-Object { $parts.Add("fw|$($_.Name)|$($_.Enabled)|$($_.Action)|$($_.Profile)") }
+    Get-NetFirewallProfile | ForEach-Object { $parts.Add("fwp|$($_.Name)|$($_.Enabled)|$($_.DefaultInboundAction)") }
+    Get-CimInstance Win32_Service | Sort-Object Name | ForEach-Object { $parts.Add("svc|$($_.Name)|$($_.StartMode)|$($_.PathName)") }
+    Get-ScheduledTask | Sort-Object TaskPath, TaskName | ForEach-Object { $parts.Add("task|$($_.TaskPath)$($_.TaskName)|$($_.State -eq 'Disabled')") }
+    try {
+        $p = Get-MpPreference
+        $parts.Add('mp|' + (($p | Select-Object DisableRealtimeMonitoring, MAPSReporting, PUAProtection, EnableNetworkProtection, CloudBlockLevel, AttackSurfaceReductionRules_Ids, AttackSurfaceReductionRules_Actions | ConvertTo-Json -Compress)))
+    }
+    catch { $parts.Add("mp|unavailable|$($_.Exception.GetType().Name)") }
+    $reg = @(
+        @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'EnableLUA'),
+        @('HKLM:\SYSTEM\CurrentControlSet\Control\Lsa', 'RunAsPPL'),
+        @('HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server', 'fDenyTSConnections'),
+        @('HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell', 'ExecutionPolicy'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient', 'EnableMulticast')
+    )
+    foreach ($r in $reg) {
+        $v = $null
+        if (Test-Path -LiteralPath $r[0]) { $v = (Get-Item -LiteralPath $r[0]).GetValue($r[1]) }
+        $parts.Add("reg|$($r[0])|$($r[1])|$v")
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '' }
+    finally { $sha.Dispose() }
+}
+
+$audit = Join-Path $PSScriptRoot '..\winsec-audit.ps1'
+$out = Join-Path ([IO.Path]::GetTempPath()) ("winsec-smoke-" + [guid]::NewGuid().ToString('N'))
+$problems = New-Object System.Collections.Generic.List[string]
+
+try {
+    $before = Get-StateFingerprint
+    $auditArgs = @{ OutputPath = $out; Quiet = $true }
+    if (-not $WithWinget) { $auditArgs['SkipWinget'] = $true }
+    & $audit @auditArgs
+    $exit = $LASTEXITCODE
+    $after = Get-StateFingerprint
+
+    if ($exit -ne 0) { $problems.Add("audit exit code $exit") }
+    if ($before -ne $after) { $problems.Add("system state changed during the audit (fingerprint $before -> $after)") }
+
+    $dir = @(Get-ChildItem -LiteralPath $out -Directory) | Select-Object -First 1
+    if (-not $dir) { throw 'No report folder written.' }
+    foreach ($f in 'report.md', 'report.json') {
+        if (-not (Test-Path -LiteralPath (Join-Path $dir.FullName $f))) { $problems.Add("$f missing") }
+    }
+    $json = Get-Content -LiteralPath (Join-Path $dir.FullName 'report.json') -Raw | ConvertFrom-Json
+    $score = [int]$json.meta.Score
+    if ($score -lt 0 -or $score -gt 100) { $problems.Add("score out of range: $score") }
+    $results = @($json.results)
+    if ($results.Count -lt 30) { $problems.Add("only $($results.Count) results") }
+    $allowed = 'Pass', 'Warn', 'Fail', 'Info', 'Skipped', 'Error'
+    foreach ($r in $results) {
+        if ($r.Status -notin $allowed) { $problems.Add("$($r.Id): invalid status '$($r.Status)'") }
+        foreach ($field in 'Id', 'Category', 'Title', 'Severity', 'Weight', 'Evidence', 'Fix') {
+            if (-not $r.PSObject.Properties[$field]) { $problems.Add("$($r.Id): field '$field' missing") }
+        }
+    }
+    $errors = @($results | Where-Object { $_.Status -eq 'Error' })
+    foreach ($e in $errors) { Write-Host "  Error in $($e.Id): $($e.Evidence)" -ForegroundColor Yellow }
+    if ($errors.Count -gt $MaxErrors) { $problems.Add("$($errors.Count) check(s) ended with Error (max $MaxErrors)") }
+
+    Write-Host ("Checks {0}, score {1}, fingerprint {2}" -f $results.Count, $score, $before.Substring(0, 16))
+}
+finally {
+    if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+}
+
+if ($problems.Count) {
+    Write-Host 'SMOKE TEST FAILED:' -ForegroundColor Red
+    $problems | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+}
+Write-Host 'Smoke test passed: report valid, system state unchanged.' -ForegroundColor Green
+exit 0

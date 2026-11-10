@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer (errors only)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $r = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }
+
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read-only guard
+        shell: ${{ matrix.shell }}
+        run: ./tests/Test-ReadOnly.ps1
+      - name: Guard self-test
+        shell: ${{ matrix.shell }}
+        run: ./tests/Test-GuardSelf.ps1
+      - name: Smoke test (state fingerprint)
+        shell: ${{ matrix.shell }}
+        # hosted runners are VMs: a few platform checks (TPM, Device Guard) may not be queryable there
+        run: ./tests/Test-Smoke.ps1 -MaxErrors 3
