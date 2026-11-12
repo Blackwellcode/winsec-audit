@@ -15,10 +15,14 @@
       - native arguments that repair, install or configure.
 #>
 [CmdletBinding()]
-param([string]$Path = (Join-Path $PSScriptRoot '..\winsec-audit.ps1'))
+param([string]$Path)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+# Resolved here, not as a param default: with [CmdletBinding()], Windows PowerShell 5.1 leaves $PSScriptRoot
+# empty while it evaluates param defaults under "powershell -File".
+if (-not $Path) { $Path = Join-Path $PSScriptRoot '..\winsec-audit.ps1' }
 
 $file = (Resolve-Path -LiteralPath $Path).Path
 $tokens = $null; $parseErrors = $null

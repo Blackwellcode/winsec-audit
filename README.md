@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/Blackwellcode/winsec-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackwellcode/winsec-audit/actions/workflows/ci.yml)
 
-Lightweight, **read-only** security audit for Windows 10/11 workstations. A single PowerShell script with no dependencies. It runs 44 checks and writes a Markdown and a JSON report.
+Lightweight, **read-only** security audit for Windows 10/11 workstations. A single PowerShell script with no dependencies. It runs 49 checks and writes a Markdown and a JSON report.
 
 It never changes your system: no registry writes, no service or firewall changes, no scans, no repairs, no installs. That is enforced on every commit by a static AST guard plus a runtime test that fingerprints system state before and after the run.
 
@@ -32,12 +32,12 @@ Downloaded the ZIP instead of cloning? Windows marks it as coming from the inter
 | Area | Checks |
 | :--- | :--- |
 | Patching | last successful update install, pending reboot |
-| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control |
+| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control, email and removable drive scanning, extended cloud check |
 | Firewall | profiles and default inbound action, script interpreters reachable inbound on Public networks, network categories |
-| Network | SMBv1, SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file |
+| Network | SMBv1 (server; client feature when elevated), SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file, Point and Print driver installation (PrintNightmare), legacy Telnet/TFTP clients |
 | Accounts | UAC, built-in Administrator/Guest, local administrators, auto-logon password, enabled local accounts |
 | Platform | Secure Boot, TPM 2.0, BitLocker, HVCI/Credential Guard, LSA protection/WDigest, vulnerable driver blocklist |
-| Logging | script block logging and 4688 command lines, execution policy, PowerShell 2.0 |
+| Logging | script block logging and 4688 command lines, execution policy, PowerShell 2.0, event log sizes, process creation auditing (event 4688 recorded) |
 | Persistence | unsigned autostarts, orphaned/unsigned scheduled tasks, unsigned services and unquoted service paths, Winlogon/AppInit/IFEO hijacks, WMI subscriptions, local root CAs with private keys |
 | Software | outdated packages via `winget upgrade` |
 | Integrity | unsigned kernel drivers in `System32\drivers`; with `-Deep`: DISM and SFC |
@@ -49,7 +49,7 @@ Each check reports `Pass`, `Warn`, `Fail`, `Info`, `Skipped` or `Error`, with ev
 ```mermaid
 flowchart LR
     subgraph Script["winsec-audit.ps1"]
-        C["44 × Invoke-Check<br/>-RequiresAdmin, -DeepOnly"] --> F["Findings<br/>Pass · Warn · Fail · Info · Skipped · Error"]
+        C["49 × Invoke-Check<br/>-RequiresAdmin, -DeepOnly"] --> F["Findings<br/>Pass · Warn · Fail · Info · Skipped · Error"]
         F --> W["Write-Report"]
     end
     N["Native allowlist<br/>tpmtool · winget · dism · sfc"] -->|fixed arguments| C
@@ -77,7 +77,7 @@ Each check runs on its own: an exception becomes an `Error` finding for that che
    - non-allowlisted COM objects;
    - repair/install arguments such as `/scannow` or `/RestoreHealth`.
 2. **Native allowlist**: the only external programs are `tpmtool getdeviceinformation`, `winget upgrade --include-unknown --disable-interactivity` (lists, never installs), `dism /Online /Cleanup-Image /ScanHealth` and `sfc /verifyonly`. All four are hard-coded in one table with fixed arguments.
-3. **Guard self-test** (`tests/Test-GuardSelf.ps1`) feeds 15 forbidden samples (`Set-ItemProperty`, `Remove-Item`, `Set-MpPreference`, `Invoke-CimMethod`, `sfc /scannow`, …) to the guard and requires each to be rejected.
+3. **Guard self-test** (`tests/Test-GuardSelf.ps1`) feeds 30 forbidden samples (`Set-ItemProperty`, `Remove-Item`, `Set-MpPreference`, `Invoke-CimMethod`, `sfc /scannow`, …) to the guard and requires each to be rejected, plus 2 clean samples that must pass.
 4. **Runtime proof** (`tests/Test-Smoke.ps1`) snapshots firewall rules, services, scheduled tasks, Defender preferences and key registry values, runs the audit, and compares. Windows changes some of this on its own: BITS toggles its start type, and maintenance jobs update tasks. So every changed object is attributed through the event log (System 7040, TaskScheduler 140–142). A change that an event assigns to another actor, such as SYSTEM or the machine account, is reported as background activity. Any change without such attribution fails the test.
 
 Side effects that remain: Windows itself writes to its own logs (`CBS.log`, `dism.log`) during `-Deep`, and `winget` refreshes its package cache.
@@ -94,7 +94,7 @@ Reports contain host name, user name, account names, installed software and list
 .\tests\Test-Smoke.ps1        # run + state fingerprint + report schema
 ```
 
-CI (`.github/workflows/ci.yml`) runs PSScriptAnalyzer and all three tests on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7.
+CI (`.github/workflows/ci.yml`) runs PSScriptAnalyzer and all four tests on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7.
 
 Adding a check: call `Invoke-Check` with an `Id`, `Category`, `Title`, `Severity`, `Weight` and a body that returns `New-Finding Pass|Warn|Fail|Info "<evidence>" "<fix>"`. Use `-RequiresAdmin`/`-DeepOnly` where needed. The guard tells you if the body is not read-only.
 

@@ -1,6 +1,6 @@
 # winsec-audit – Projektanker
 
-Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audit.ps1`), kompatibel mit Windows PowerShell 5.1 und PowerShell 7. Herkunft: das manuelle Audit vom 2026-11-09 (`F:\tools\windows-security-audit`).
+Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audit.ps1`), kompatibel mit Windows PowerShell 5.1 und PowerShell 7. Herkunft: das manuelle Audit vom 2026-11-09, archiviert unter `F:\archiv\windows-security-audit-20261112` (dort auch das schreibende Härtungsskript `Invoke-SecurityHardening.ps1`, das hier bewusst nicht übernommen wurde).
 
 ## Invarianten (nicht verhandelbar)
 
@@ -11,6 +11,8 @@ Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audi
   - `.\tests\Test-ReadOnly.ps1` (Exit 0)
   - `.\tests\Test-GuardSelf.ps1` (Exit 0)
   - `.\tests\Test-Smoke.ps1` (Exit 0, Fingerprint unverändert)
+  - `.\tests\Test-DefenderUnavailable.ps1` (Exit 0)
+- Nicht lesbare Werte enden als `Error` (oder `Info`, wenn nichts bewertbar ist), nie als `Pass`: kein Cast von `$null` auf 0/False (siehe `Get-DefenderValue`).
 - Guard-Regeln nicht aufweichen, um einen Check durchzubringen: Der Check wird angepasst, nicht der Guard.
 
 ## Konventionen
