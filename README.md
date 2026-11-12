@@ -77,7 +77,7 @@ Each check runs on its own: an exception becomes an `Error` finding for that che
    - non-allowlisted COM objects;
    - repair/install arguments such as `/scannow` or `/RestoreHealth`.
 2. **Native allowlist**: the only external programs are `tpmtool getdeviceinformation`, `winget upgrade --include-unknown --disable-interactivity` (lists, never installs), `dism /Online /Cleanup-Image /ScanHealth` and `sfc /verifyonly`. All four are hard-coded in one table with fixed arguments.
-3. **Guard self-test** (`tests/Test-GuardSelf.ps1`) feeds 15 forbidden samples (`Set-ItemProperty`, `Remove-Item`, `Set-MpPreference`, `Invoke-CimMethod`, `sfc /scannow`, …) to the guard and requires each to be rejected.
+3. **Guard self-test** (`tests/Test-GuardSelf.ps1`) feeds 30 forbidden samples (`Set-ItemProperty`, `Remove-Item`, `Set-MpPreference`, `Invoke-CimMethod`, `sfc /scannow`, …) to the guard and requires each to be rejected, plus 2 clean samples that must pass.
 4. **Runtime proof** (`tests/Test-Smoke.ps1`) snapshots firewall rules, services, scheduled tasks, Defender preferences and key registry values, runs the audit, and compares. Windows changes some of this on its own: BITS toggles its start type, and maintenance jobs update tasks. So every changed object is attributed through the event log (System 7040, TaskScheduler 140–142). A change that an event assigns to another actor, such as SYSTEM or the machine account, is reported as background activity. Any change without such attribution fails the test.
 
 Side effects that remain: Windows itself writes to its own logs (`CBS.log`, `dism.log`) during `-Deep`, and `winget` refreshes its package cache.
