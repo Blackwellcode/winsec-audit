@@ -16,6 +16,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - `winget.exe` is taken from the installed App Installer package and must carry a valid Microsoft signature; the per-user execution alias on `PATH` is no longer used.
 
 ### Fixed
+- `powershell -File .\winsec-audit.ps1` (the README quick start) and `powershell -File .\tests\Test-ReadOnly.ps1` failed under Windows PowerShell 5.1 with a `Join-Path` error: with `[CmdletBinding()]`, `$PSScriptRoot` is empty while param defaults are evaluated. Both defaults are now resolved in the script body.
 - DEF-07 (*No active threats*) reports **Error** when the Defender threat query fails instead of reporting **Pass**.
 - Unreadable Defender data no longer yields a false **Pass**: `Get-MpPreference` is queried separately from `Get-MpComputerStatus`, DEF-04/05/06/09 require readable preferences, and DEF-02/03/04/09 end as **Error** when a value is not reported (a `$null` cast to 0/False used to pass).
 

@@ -9,7 +9,7 @@
     enforces that on every commit. Without elevation, admin-only checks are reported as Skipped.
 
 .PARAMETER OutputPath
-    Folder for the reports. A sub folder <computer>-<timestamp> is created inside it.
+    Folder for the reports. A sub folder <computer>-<timestamp> is created inside it. Default: .\reports next to the script.
 
 .PARAMETER Deep
     Adds DISM /ScanHealth and sfc /verifyonly (elevated, several minutes). Both only verify.
@@ -29,7 +29,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot 'reports'),
+    [string]$OutputPath,
     [switch]$Deep,
     [switch]$SkipWinget,
     [switch]$Redact,
@@ -39,6 +39,10 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+# Resolved here, not as a param default: with [CmdletBinding()], Windows PowerShell 5.1 leaves $PSScriptRoot
+# empty while it evaluates param defaults under "powershell -File", and Join-Path then fails.
+if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'reports' }
 
 $script:Version = '0.1.0'
 $script:Results = New-Object System.Collections.Generic.List[object]
