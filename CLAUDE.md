@@ -11,6 +11,8 @@ Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audi
   - `.\tests\Test-ReadOnly.ps1` (Exit 0)
   - `.\tests\Test-GuardSelf.ps1` (Exit 0)
   - `.\tests\Test-Smoke.ps1` (Exit 0, Fingerprint unverändert)
+  - `.\tests\Test-DefenderUnavailable.ps1` (Exit 0)
+- Nicht lesbare Werte enden als `Error` (oder `Info`, wenn nichts bewertbar ist), nie als `Pass`: kein Cast von `$null` auf 0/False (siehe `Get-DefenderValue`).
 - Guard-Regeln nicht aufweichen, um einen Check durchzubringen: Der Check wird angepasst, nicht der Guard.
 
 ## Konventionen

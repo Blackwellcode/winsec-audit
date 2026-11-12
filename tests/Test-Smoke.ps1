@@ -147,12 +147,14 @@ try {
     # every Invoke-Check declared in the script reports exactly once
     $tokens = $null; $parseErrors = $null
     $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $audit).Path, [ref]$tokens, [ref]$parseErrors)
+    foreach ($pe in @($parseErrors)) { $problems.Add("parse error line $($pe.Extent.StartLineNumber): $($pe.Message)") }
     $declared = @($scriptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Check' }, $true) | ForEach-Object {
             $els = $_.CommandElements
             for ($i = 1; $i -lt $els.Count - 1; $i++) {
                 if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and $els[$i].ParameterName -eq 'Id') { $els[$i + 1].Extent.Text.Trim("'", '"') }
             }
         })
+    if (-not $declared) { $problems.Add('no Invoke-Check -Id found in the script') }
     $reported = @($results | ForEach-Object { [string]$_.Id })
     foreach ($id in $declared) {
         $n = @($reported | Where-Object { $_ -eq $id }).Count

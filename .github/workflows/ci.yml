@@ -43,3 +43,5 @@ jobs:
         run: ./tests/Test-GuardSelf.ps1
       - name: Smoke test (state fingerprint)
         run: ./tests/Test-Smoke.ps1
+      - name: Defender data unavailable (Error, never Pass)
+        run: ./tests/Test-DefenderUnavailable.ps1

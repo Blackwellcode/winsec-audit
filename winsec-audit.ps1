@@ -185,6 +185,22 @@ function Invoke-ReadOnlyNative {
     }
 }
 
+$script:FeatureStates = $null
+# Enabled or waiting for a reboot to become enabled: both count as on.
+$script:ActiveFeatureStates = 'Enabled', 'EnablePending'
+
+function Get-OptionalFeatureState([string]$Name) {
+    # One listing for all checks, cached. -FeatureName with a name this edition does not know (e.g. TFTP on
+    # Windows Server) raises an error instead of returning nothing. Requires elevation.
+    if ($null -eq $script:FeatureStates) {
+        $map = @{}
+        foreach ($f in @(Get-WindowsOptionalFeature -Online -ErrorAction Stop)) { $map[$f.FeatureName] = $f.State.ToString() }
+        $script:FeatureStates = $map
+    }
+    if ($script:FeatureStates.ContainsKey($Name)) { return $script:FeatureStates[$Name] }
+    return 'not present'
+}
+
 function Join-Limited([object[]]$Items, [int]$Max = 12) {
     $list = @($Items)
     $shown = ($list | Select-Object -First $Max) -join '; '
@@ -209,12 +225,23 @@ $script:Meta = [ordered]@{
     Deep         = [bool]$Deep
 }
 
-$script:MpStatus = $null; $script:MpPref = $null; $script:MpError = ''
-try { $script:MpStatus = Get-MpComputerStatus; $script:MpPref = Get-MpPreference }
-catch { $script:MpError = $_.Exception.Message }
+$script:MpStatus = $null; $script:MpPref = $null; $script:MpError = ''; $script:MpPrefError = ''
+# Queried separately: the status can be readable while the preferences are not. Both errors surface via Assert-Defender.
+try { $script:MpStatus = Get-MpComputerStatus }
+catch { $script:MpError = "$($_.Exception.GetType().Name): $($_.Exception.Message)" }
+try { $script:MpPref = Get-MpPreference }
+catch { $script:MpPrefError = "$($_.Exception.GetType().Name): $($_.Exception.Message)" }
 
-function Assert-Defender {
+function Assert-Defender([switch]$Preference) {
     if (-not $script:MpStatus) { throw "Microsoft Defender not queryable: $script:MpError" }
+    if ($Preference -and -not $script:MpPref) { throw "Microsoft Defender preferences not queryable: $script:MpPrefError" }
+}
+
+function Get-DefenderValue($Object, [string]$Name) {
+    # A missing value must end the check as Error; casting $null gives 0/False and with it a false Pass.
+    $v = Get-PropValue $Object $Name
+    if ($null -eq $v) { throw "Microsoft Defender did not report '$Name'." }
+    return $v
 }
 
 if (-not $Quiet) {
@@ -271,7 +298,7 @@ Invoke-Check -Id 'DEF-01' -Category 'Defender' -Title 'Real-time protection and 
 
 Invoke-Check -Id 'DEF-02' -Category 'Defender' -Title 'Security intelligence up to date' -Severity 'High' -Weight 5 -Body {
     Assert-Defender
-    $age = [int]$script:MpStatus.AntivirusSignatureAge
+    $age = [int](Get-DefenderValue $script:MpStatus 'AntivirusSignatureAge')
     $ev = "Signature $($script:MpStatus.AntivirusSignatureVersion), $age day(s) old."
     if ($age -le 2) { return New-Finding Pass $ev }
     if ($age -le 7) { return New-Finding Warn $ev 'Update-MpSignature or Windows Update.' }
@@ -280,7 +307,7 @@ Invoke-Check -Id 'DEF-02' -Category 'Defender' -Title 'Security intelligence up 
 
 Invoke-Check -Id 'DEF-03' -Category 'Defender' -Title 'Recent quick and full scan' -Severity 'Low' -Weight 3 -Body {
     Assert-Defender
-    $q = [int64]$script:MpStatus.QuickScanAge; $f = [int64]$script:MpStatus.FullScanAge
+    $q = [int64](Get-DefenderValue $script:MpStatus 'QuickScanAge'); $f = [int64](Get-DefenderValue $script:MpStatus 'FullScanAge')
     $fs = if ($f -ge 4294967295) { 'never' } else { "$f day(s) ago" }
     $ev = "Quick scan $q day(s) ago, full scan $fs."
     if ($q -le 7 -and $f -le 35) { return New-Finding Pass $ev }
@@ -288,14 +315,16 @@ Invoke-Check -Id 'DEF-03' -Category 'Defender' -Title 'Recent quick and full sca
 }
 
 Invoke-Check -Id 'DEF-04' -Category 'Defender' -Title 'Cloud protection, PUA and network protection' -Severity 'Medium' -Weight 5 -Body {
-    Assert-Defender
+    Assert-Defender -Preference
     $p = $script:MpPref
+    $maps = [int](Get-DefenderValue $p 'MAPSReporting'); $pua = [int](Get-DefenderValue $p 'PUAProtection')
+    $np = [int](Get-DefenderValue $p 'EnableNetworkProtection'); $cbl = [int](Get-DefenderValue $p 'CloudBlockLevel')
     $miss = @()
-    if ([int]$p.MAPSReporting -eq 0) { $miss += 'cloud protection (MAPS) off' }
-    if ([int]$p.PUAProtection -ne 1) { $miss += 'PUA protection not blocking' }
-    if ([int]$p.EnableNetworkProtection -ne 1) { $miss += 'network protection not enabled' }
-    if ([int]$p.CloudBlockLevel -lt 2) { $miss += "cloud block level $([int]$p.CloudBlockLevel) (<2 High)" }
-    $ev = "MAPS=$([int]$p.MAPSReporting), PUA=$([int]$p.PUAProtection), NetworkProtection=$([int]$p.EnableNetworkProtection), CloudBlockLevel=$([int]$p.CloudBlockLevel)."
+    if ($maps -eq 0) { $miss += 'cloud protection (MAPS) off' }
+    if ($pua -ne 1) { $miss += 'PUA protection not blocking' }
+    if ($np -ne 1) { $miss += 'network protection not enabled' }
+    if ($cbl -lt 2) { $miss += "cloud block level $cbl (<2 High)" }
+    $ev = "MAPS=$maps, PUA=$pua, NetworkProtection=$np, CloudBlockLevel=$cbl."
     $fix = 'Set-MpPreference -CloudBlockLevel High -EnableNetworkProtection Enabled -PUAProtection Enabled'
     if (-not $miss) { return New-Finding Pass $ev }
     if ($miss.Count -le 2) { return New-Finding Warn "$ev $($miss -join '; ')." $fix }
@@ -303,7 +332,7 @@ Invoke-Check -Id 'DEF-04' -Category 'Defender' -Title 'Cloud protection, PUA and
 }
 
 Invoke-Check -Id 'DEF-05' -Category 'Defender' -Title 'Attack surface reduction rules' -Severity 'Medium' -Weight 8 -Body {
-    Assert-Defender
+    Assert-Defender -Preference
     $ids = @($script:MpPref.AttackSurfaceReductionRules_Ids | Where-Object { $_ })
     $acts = @($script:MpPref.AttackSurfaceReductionRules_Actions | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
     $block = @($acts | Where-Object { $_ -eq 1 }).Count
@@ -317,7 +346,7 @@ Invoke-Check -Id 'DEF-05' -Category 'Defender' -Title 'Attack surface reduction 
 }
 
 Invoke-Check -Id 'DEF-06' -Category 'Defender' -Title 'No Defender exclusions' -Severity 'High' -Weight 4 -RequiresAdmin -Body {
-    Assert-Defender
+    Assert-Defender -Preference
     $p = $script:MpPref
     $ex = @()
     foreach ($n in 'ExclusionPath', 'ExclusionProcess', 'ExclusionExtension', 'ExclusionIpAddress') {
@@ -350,14 +379,23 @@ Invoke-Check -Id 'DEF-08' -Category 'Defender' -Title 'Smart App Control state' 
     New-Finding Info "Smart App Control: $sac. (Once off it can only be re-enabled by reinstalling Windows.)"
 }
 
-Invoke-Check -Id 'DEF-09' -Category 'Defender' -Title 'Email and removable drive scanning on' -Severity 'Low' -Weight 2 -Body {
-    Assert-Defender
+Invoke-Check -Id 'DEF-09' -Category 'Defender' -Title 'Email and removable drive scanning on, extended cloud check' -Severity 'Low' -Weight 2 -Body {
+    Assert-Defender -Preference
     $p = $script:MpPref
-    $email = [bool](Get-PropValue $p 'DisableEmailScanning')
-    $usb = [bool](Get-PropValue $p 'DisableRemovableDriveScanning')
-    $ev = "DisableEmailScanning=$email, DisableRemovableDriveScanning=$usb, CloudExtendedTimeout=$([int](Get-PropValue $p 'CloudExtendedTimeout')) s."
-    if (-not $email -and -not $usb) { return New-Finding Pass $ev }
-    New-Finding Warn $ev 'Set-MpPreference -DisableEmailScanning $false -DisableRemovableDriveScanning $false (both are off by default).'
+    $email = [bool](Get-DefenderValue $p 'DisableEmailScanning')
+    $usb = [bool](Get-DefenderValue $p 'DisableRemovableDriveScanning')
+    $timeout = [int](Get-DefenderValue $p 'CloudExtendedTimeout')
+    # CloudExtendedTimeout adds 0-50 s to the default 10 s that Defender holds a first-seen file while it waits for
+    # the cloud verdict. 50 s (the maximum) gives the cloud the most time; the delay only hits files held for that
+    # verdict, not every file, which is why the maximum is the target here.
+    $target = 50
+    $ev = "DisableEmailScanning=$email, DisableRemovableDriveScanning=$usb, CloudExtendedTimeout=$timeout s (target $target s)."
+    $issues = @()
+    if ($email) { $issues += '-DisableEmailScanning $false' }
+    if ($usb) { $issues += '-DisableRemovableDriveScanning $false' }
+    if ($timeout -lt $target) { $issues += "-CloudExtendedTimeout $target" }
+    if (-not $issues) { return New-Finding Pass $ev }
+    New-Finding Warn $ev "Set-MpPreference $($issues -join ' ') (email and removable drive scanning are off by default)."
 }
 
 # ---------------------------------------------------------------------------
@@ -396,10 +434,17 @@ Invoke-Check -Id 'FW-03' -Category 'Firewall' -Title 'Network categories' -Sever
 # Network exposure
 # ---------------------------------------------------------------------------
 
-Invoke-Check -Id 'NET-01' -Category 'Network' -Title 'SMBv1 server disabled' -Severity 'High' -Weight 6 -Body {
+Invoke-Check -Id 'NET-01' -Category 'Network' -Title 'SMBv1 disabled' -Severity 'High' -Weight 6 -Body {
+    # SMBv1 is scored only here. The optional feature SMB1Protocol (it also carries the SMBv1 client) needs elevation
+    # to read; without it the check rests on the server configuration alone and says so.
     $c = Get-SmbServerConfiguration
-    if ($c.EnableSMB1Protocol) { return New-Finding Fail 'EnableSMB1Protocol = True.' 'Disable SMBv1: Set-SmbServerConfiguration -EnableSMB1Protocol $false' }
-    New-Finding Pass 'EnableSMB1Protocol = False.'
+    $ev = "Server EnableSMB1Protocol=$($c.EnableSMB1Protocol)"
+    $feature = 'not checked (requires elevation)'
+    if ($script:IsAdmin) { $feature = Get-OptionalFeatureState 'SMB1Protocol' }
+    $ev += "; optional feature SMB1Protocol: $feature."
+    $fix = 'Disable SMBv1: Set-SmbServerConfiguration -EnableSMB1Protocol $false; Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol (elevated).'
+    if ($c.EnableSMB1Protocol -or $feature -in $script:ActiveFeatureStates) { return New-Finding Fail $ev $fix }
+    New-Finding Pass $ev
 }
 
 Invoke-Check -Id 'NET-02' -Category 'Network' -Title 'SMB signing required, no insecure guest logons' -Severity 'Medium' -Weight 3 -Body {
@@ -467,17 +512,14 @@ Invoke-Check -Id 'NET-08' -Category 'Network' -Title 'Point and Print: printer d
     New-Finding Warn $ev $fix
 }
 
-Invoke-Check -Id 'NET-09' -Category 'Network' -Title 'Legacy client features removed (SMB1, Telnet, TFTP)' -Severity 'Medium' -Weight 2 -RequiresAdmin -Body {
-    $names = 'SMB1Protocol', 'TelnetClient', 'TFTP'
-    # one full listing instead of -FeatureName: an unknown name (e.g. on Windows Server) must not end the check
-    $features = @(Get-WindowsOptionalFeature -Online -ErrorAction Stop | Where-Object { $_.FeatureName -in $names })
-    $state = @{}; foreach ($f in $features) { $state[$f.FeatureName] = $f.State.ToString() }
-    $ev = ($names | ForEach-Object { "${_}: $(if ($state.ContainsKey($_)) { $state[$_] } else { 'not present' })" }) -join '; '
-    $on = @($names | Where-Object { $state.ContainsKey($_) -and $state[$_] -eq 'Enabled' })
-    $fix = "Disable-WindowsOptionalFeature -Online -FeatureName $($on -join ', ') (elevated)."
-    if ($on -contains 'SMB1Protocol') { return New-Finding Fail "$ev." $fix }
-    if ($on) { return New-Finding Warn "$ev." $fix }
-    New-Finding Pass "$ev."
+Invoke-Check -Id 'NET-09' -Category 'Network' -Title 'Legacy Telnet and TFTP clients removed' -Severity 'Low' -Weight 2 -RequiresAdmin -Body {
+    # SMB1Protocol is deliberately not scored here: NET-01 owns SMBv1, so one finding is not counted twice.
+    $names = 'TelnetClient', 'TFTP'
+    $state = @{}; foreach ($n in $names) { $state[$n] = Get-OptionalFeatureState $n }
+    $ev = "$((($names | ForEach-Object { "${_}: $($state[$_])" }) -join '; ')). SMBv1: see NET-01."
+    $on = @($names | Where-Object { $state[$_] -in $script:ActiveFeatureStates })
+    if (-not $on) { return New-Finding Pass $ev }
+    New-Finding Warn $ev "Disable-WindowsOptionalFeature -Online -FeatureName $($on -join ', ') (elevated). Plain-text clients that attackers use to move files."
 }
 
 # ---------------------------------------------------------------------------
@@ -620,15 +662,17 @@ Invoke-Check -Id 'LOG-03' -Category 'Logging' -Title 'PowerShell 2.0 engine remo
 }
 
 Invoke-Check -Id 'LOG-04' -Category 'Logging' -Title 'Security event logs large enough for forensics' -Severity 'Low' -Weight 2 -Body {
+    # Minimum sizes in MB: the only place these targets are defined; the fix text is built from it.
     $targets = [ordered]@{ 'Security' = 256; 'Microsoft-Windows-PowerShell/Operational' = 128; 'Microsoft-Windows-Windows Defender/Operational' = 64 }
-    $parts = @(); $issues = @()
+    $parts = @(); $issues = @(); $unknown = @()
     foreach ($name in $targets.Keys) {
         try { $log = Get-WinEvent -ListLog $name -ErrorAction Stop }
         catch {
             $id = $_.FullyQualifiedErrorId
-            if ($id -like 'NoMatchingLogsFound*') { $parts += "$name not present"; continue }
+            # e.g. no Defender log when another antivirus replaced Defender
+            if ($id -like 'NoMatchingLogsFound*') { $parts += "$name not present"; $unknown += $name; continue }
             # without elevation the Security log reports LogInfoUnavailable
-            if ($id -like 'LogInfoUnavailable*' -or $_.Exception -is [System.UnauthorizedAccessException]) { $parts += "$name unreadable"; $issues += "$name not readable (run elevated)"; continue }
+            if ($id -like 'LogInfoUnavailable*' -or $_.Exception -is [System.UnauthorizedAccessException]) { $parts += "$name not readable (requires elevation)"; $unknown += $name; continue }
             throw
         }
         $mb = [math]::Round($log.MaximumSizeInBytes / 1MB)
@@ -637,21 +681,30 @@ Invoke-Check -Id 'LOG-04' -Category 'Logging' -Title 'Security event logs large 
         elseif ($log.MaximumSizeInBytes -lt [int64]$targets[$name] * 1MB) { $issues += "$name $mb MB < $($targets[$name]) MB" }
     }
     $ev = "$($parts -join '; ')."
-    if (-not $issues) { return New-Finding Pass $ev }
-    New-Finding Warn "$ev $($issues -join '; ')." 'Raise the maximum size (Event Viewer > log properties, or the Event Log policies): Security 256 MB, PowerShell/Operational 128 MB, Defender/Operational 64 MB.'
+    $fix = "Raise the maximum size (Event Viewer > log properties, or the Event Log policies) to at least: $(($targets.Keys | ForEach-Object { "$_ $($targets[$_]) MB" }) -join ', ')."
+    if ($issues) { return New-Finding Warn "$ev $($issues -join '; ')." $fix }
+    # a log that could not be measured is neither a pass nor a failure: report it without scoring
+    if ($unknown) { return New-Finding Info "$ev Not assessed: $($unknown -join ', ')." $fix }
+    New-Finding Pass $ev
 }
 
 Invoke-Check -Id 'LOG-05' -Category 'Logging' -Title 'Process creation auditing on (event 4688)' -Severity 'Medium' -Weight 3 -RequiresAdmin -Body {
     # Elevation is required: without it, a Security log query returns "no events" instead of access denied.
+    # The audit policy itself is not read (that would need auditpol.exe outside the native allowlist); a recorded
+    # event is the evidence. Limits, stated in the finding: it proves auditing was on when that event was written,
+    # so turning it off within the last 24 h goes unnoticed; and a full log in "Retain" mode stops recording.
     $newest = $null
     try { $newest = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688 } -MaxEvents 1 -ErrorAction Stop }
     catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
-    $fix = 'auditpol /set /subcategory:{0CCE922B-69AE-11D9-BED3-505054503030} /success:enable (elevated), or the policy "Audit Process Creation". LOG-01 adds the command lines.'
-    if (-not $newest) { return New-Finding Fail 'No event 4688 in the Security log: process creation is not audited.' $fix }
+    $mode = (Get-WinEvent -ListLog 'Security' -ErrorAction Stop).LogMode.ToString()
+    $fix = 'auditpol /set /subcategory:{0CCE922B-69AE-11D9-BED3-505054503030} /success:enable (elevated), or the policy "Audit Process Creation". LOG-01 adds the command lines. Keep the Security log in Circular mode so a full log does not stop recording.'
+    if (-not $newest) { return New-Finding Fail "No event 4688 in the Security log (log mode $mode): process creation is not audited, or the log was cleared." $fix }
     $age = (Get-Date) - $newest.TimeCreated
-    $ev = "Newest event 4688: $($newest.TimeCreated.ToString('s')) ($([math]::Round($age.TotalHours, 1)) h ago)."
-    if ($age.TotalHours -le 24) { return New-Finding Pass $ev }
-    New-Finding Warn "$ev Processes start constantly, so auditing was probably turned off since." $fix
+    $ev = "Newest event 4688: $($newest.TimeCreated.ToString('s')) ($([math]::Round($age.TotalHours, 1)) h ago); Security log mode $mode."
+    $limit = 'This proves auditing was on at that time; turning it off in the last 24 h would not show here.'
+    if ($age.TotalHours -gt 24) { return New-Finding Warn "$ev Processes start constantly, so auditing was probably turned off since, or the log is full." $fix }
+    if ($mode -eq 'Retain') { return New-Finding Warn "$ev Retain mode: once the log is full, no new events are written. $limit" $fix }
+    New-Finding Pass "$ev $limit"
 }
 
 # ---------------------------------------------------------------------------

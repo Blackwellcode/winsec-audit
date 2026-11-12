@@ -32,9 +32,9 @@ Downloaded the ZIP instead of cloning? Windows marks it as coming from the inter
 | Area | Checks |
 | :--- | :--- |
 | Patching | last successful update install, pending reboot |
-| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control, email and removable drive scanning |
+| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control, email and removable drive scanning, extended cloud check |
 | Firewall | profiles and default inbound action, script interpreters reachable inbound on Public networks, network categories |
-| Network | SMBv1, SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file, Point and Print driver installation (PrintNightmare), legacy SMB1/Telnet/TFTP client features |
+| Network | SMBv1 (server; client feature when elevated), SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file, Point and Print driver installation (PrintNightmare), legacy Telnet/TFTP clients |
 | Accounts | UAC, built-in Administrator/Guest, local administrators, auto-logon password, enabled local accounts |
 | Platform | Secure Boot, TPM 2.0, BitLocker, HVCI/Credential Guard, LSA protection/WDigest, vulnerable driver blocklist |
 | Logging | script block logging and 4688 command lines, execution policy, PowerShell 2.0, event log sizes, process creation auditing (event 4688 recorded) |
@@ -94,7 +94,7 @@ Reports contain host name, user name, account names, installed software and list
 .\tests\Test-Smoke.ps1        # run + state fingerprint + report schema
 ```
 
-CI (`.github/workflows/ci.yml`) runs PSScriptAnalyzer and all three tests on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7.
+CI (`.github/workflows/ci.yml`) runs PSScriptAnalyzer and all four tests on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7.
 
 Adding a check: call `Invoke-Check` with an `Id`, `Category`, `Title`, `Severity`, `Weight` and a body that returns `New-Finding Pass|Warn|Fail|Info "<evidence>" "<fix>"`. Use `-RequiresAdmin`/`-DeepOnly` where needed. The guard tells you if the body is not read-only.
 
