@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/Blackwellcode/winsec-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackwellcode/winsec-audit/actions/workflows/ci.yml)
 
-Lightweight, **read-only** security audit for Windows 10/11 workstations. A single PowerShell script with no dependencies. It runs 44 checks and writes a Markdown and a JSON report.
+Lightweight, **read-only** security audit for Windows 10/11 workstations. A single PowerShell script with no dependencies. It runs 49 checks and writes a Markdown and a JSON report.
 
 It never changes your system: no registry writes, no service or firewall changes, no scans, no repairs, no installs. That is enforced on every commit by a static AST guard plus a runtime test that fingerprints system state before and after the run.
 
@@ -32,12 +32,12 @@ Downloaded the ZIP instead of cloning? Windows marks it as coming from the inter
 | Area | Checks |
 | :--- | :--- |
 | Patching | last successful update install, pending reboot |
-| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control |
+| Microsoft Defender | real-time/tamper protection, signature age, scan age, cloud/PUA/network protection, ASR rules, exclusions, active threats, Smart App Control, email and removable drive scanning |
 | Firewall | profiles and default inbound action, script interpreters reachable inbound on Public networks, network categories |
-| Network | SMBv1, SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file |
+| Network | SMBv1, SMB signing and guest logons, RDP/NLA, WinRM/RemoteRegistry/sshd/Telnet/Remote Assistance, LLMNR/NetBIOS, listening ports, hosts file, Point and Print driver installation (PrintNightmare), legacy SMB1/Telnet/TFTP client features |
 | Accounts | UAC, built-in Administrator/Guest, local administrators, auto-logon password, enabled local accounts |
 | Platform | Secure Boot, TPM 2.0, BitLocker, HVCI/Credential Guard, LSA protection/WDigest, vulnerable driver blocklist |
-| Logging | script block logging and 4688 command lines, execution policy, PowerShell 2.0 |
+| Logging | script block logging and 4688 command lines, execution policy, PowerShell 2.0, event log sizes, process creation auditing (event 4688 recorded) |
 | Persistence | unsigned autostarts, orphaned/unsigned scheduled tasks, unsigned services and unquoted service paths, Winlogon/AppInit/IFEO hijacks, WMI subscriptions, local root CAs with private keys |
 | Software | outdated packages via `winget upgrade` |
 | Integrity | unsigned kernel drivers in `System32\drivers`; with `-Deep`: DISM and SFC |
@@ -49,7 +49,7 @@ Each check reports `Pass`, `Warn`, `Fail`, `Info`, `Skipped` or `Error`, with ev
 ```mermaid
 flowchart LR
     subgraph Script["winsec-audit.ps1"]
-        C["44 × Invoke-Check<br/>-RequiresAdmin, -DeepOnly"] --> F["Findings<br/>Pass · Warn · Fail · Info · Skipped · Error"]
+        C["49 × Invoke-Check<br/>-RequiresAdmin, -DeepOnly"] --> F["Findings<br/>Pass · Warn · Fail · Info · Skipped · Error"]
         F --> W["Write-Report"]
     end
     N["Native allowlist<br/>tpmtool · winget · dism · sfc"] -->|fixed arguments| C

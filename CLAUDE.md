@@ -1,6 +1,6 @@
 # winsec-audit – Projektanker
 
-Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audit.ps1`), kompatibel mit Windows PowerShell 5.1 und PowerShell 7. Herkunft: das manuelle Audit vom 2026-11-09 (`F:\tools\windows-security-audit`).
+Read-only Security-Audit für Windows 10/11, ein PowerShell-Skript (`winsec-audit.ps1`), kompatibel mit Windows PowerShell 5.1 und PowerShell 7. Herkunft: das manuelle Audit vom 2026-11-09, archiviert unter `F:\archiv\windows-security-audit-20261112` (dort auch das schreibende Härtungsskript `Invoke-SecurityHardening.ps1`, das hier bewusst nicht übernommen wurde).
 
 ## Invarianten (nicht verhandelbar)
 

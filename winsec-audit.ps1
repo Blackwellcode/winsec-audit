@@ -3,7 +3,7 @@
     winsec-audit - read-only security audit for Windows 10/11 workstations.
 
 .DESCRIPTION
-    Runs 44 checks (patching, Microsoft Defender, firewall, network exposure, accounts,
+    Runs 49 checks (patching, Microsoft Defender, firewall, network exposure, accounts,
     boot integrity, logging, persistence, software updates, system integrity) and writes
     report.md and report.json. The script never changes system state; tests/Test-ReadOnly.ps1
     enforces that on every commit. Without elevation, admin-only checks are reported as Skipped.
@@ -350,6 +350,16 @@ Invoke-Check -Id 'DEF-08' -Category 'Defender' -Title 'Smart App Control state' 
     New-Finding Info "Smart App Control: $sac. (Once off it can only be re-enabled by reinstalling Windows.)"
 }
 
+Invoke-Check -Id 'DEF-09' -Category 'Defender' -Title 'Email and removable drive scanning on' -Severity 'Low' -Weight 2 -Body {
+    Assert-Defender
+    $p = $script:MpPref
+    $email = [bool](Get-PropValue $p 'DisableEmailScanning')
+    $usb = [bool](Get-PropValue $p 'DisableRemovableDriveScanning')
+    $ev = "DisableEmailScanning=$email, DisableRemovableDriveScanning=$usb, CloudExtendedTimeout=$([int](Get-PropValue $p 'CloudExtendedTimeout')) s."
+    if (-not $email -and -not $usb) { return New-Finding Pass $ev }
+    New-Finding Warn $ev 'Set-MpPreference -DisableEmailScanning $false -DisableRemovableDriveScanning $false (both are off by default).'
+}
+
 # ---------------------------------------------------------------------------
 # Firewall
 # ---------------------------------------------------------------------------
@@ -443,6 +453,31 @@ Invoke-Check -Id 'NET-07' -Category 'Network' -Title 'Hosts file not redirecting
     $sec = @($entries | Where-Object { $_ -match '(?i)(microsoft|windowsupdate|msftncsi|defender|smartscreen|avast|kaspersky|eset|bitdefender|malwarebytes|virustotal)' })
     if ($sec) { return New-Finding Fail "Suspicious entries: $(Join-Limited $sec)" 'Remove entries that block or redirect security/update domains.' }
     New-Finding Pass "$($entries.Count) active entr(y/ies). $(Join-Limited $entries 5)"
+}
+
+Invoke-Check -Id 'NET-08' -Category 'Network' -Title 'Point and Print: printer drivers installed by administrators only' -Severity 'High' -Weight 3 -Body {
+    $k = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint'
+    $restrict = Get-RegValue $k 'RestrictDriverInstallationToAdministrators'
+    $noWarn = Get-RegValue $k 'NoWarningNoElevationOnInstall'
+    $update = Get-RegValue $k 'UpdatePromptSettings'
+    $ev = "RestrictDriverInstallationToAdministrators=$(if ($null -eq $restrict) { 'not set (default since KB5005652: administrators only)' } else { $restrict }); NoWarningNoElevationOnInstall=$noWarn; UpdatePromptSettings=$update."
+    $fix = 'Set the policy RestrictDriverInstallationToAdministrators=1 (or remove the value) and NoWarningNoElevationOnInstall=0 (PrintNightmare, CVE-2021-34527).'
+    if ($restrict -ne 0) { return New-Finding Pass $ev }
+    if ($noWarn -eq 1 -or $update -in 1, 2) { return New-Finding Fail $ev $fix }
+    New-Finding Warn $ev $fix
+}
+
+Invoke-Check -Id 'NET-09' -Category 'Network' -Title 'Legacy client features removed (SMB1, Telnet, TFTP)' -Severity 'Medium' -Weight 2 -RequiresAdmin -Body {
+    $names = 'SMB1Protocol', 'TelnetClient', 'TFTP'
+    # one full listing instead of -FeatureName: an unknown name (e.g. on Windows Server) must not end the check
+    $features = @(Get-WindowsOptionalFeature -Online -ErrorAction Stop | Where-Object { $_.FeatureName -in $names })
+    $state = @{}; foreach ($f in $features) { $state[$f.FeatureName] = $f.State.ToString() }
+    $ev = ($names | ForEach-Object { "${_}: $(if ($state.ContainsKey($_)) { $state[$_] } else { 'not present' })" }) -join '; '
+    $on = @($names | Where-Object { $state.ContainsKey($_) -and $state[$_] -eq 'Enabled' })
+    $fix = "Disable-WindowsOptionalFeature -Online -FeatureName $($on -join ', ') (elevated)."
+    if ($on -contains 'SMB1Protocol') { return New-Finding Fail "$ev." $fix }
+    if ($on) { return New-Finding Warn "$ev." $fix }
+    New-Finding Pass "$ev."
 }
 
 # ---------------------------------------------------------------------------
@@ -582,6 +617,41 @@ Invoke-Check -Id 'LOG-03' -Category 'Logging' -Title 'PowerShell 2.0 engine remo
     if ($f -and $f.State.ToString() -eq 'Enabled') { return New-Finding Fail 'PowerShell 2.0 is enabled (bypasses logging and AMSI).' 'Disable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root' }
     $state = if ($f) { $f.State } else { 'not present' }
     New-Finding Pass "PowerShell 2.0: $state."
+}
+
+Invoke-Check -Id 'LOG-04' -Category 'Logging' -Title 'Security event logs large enough for forensics' -Severity 'Low' -Weight 2 -Body {
+    $targets = [ordered]@{ 'Security' = 256; 'Microsoft-Windows-PowerShell/Operational' = 128; 'Microsoft-Windows-Windows Defender/Operational' = 64 }
+    $parts = @(); $issues = @()
+    foreach ($name in $targets.Keys) {
+        try { $log = Get-WinEvent -ListLog $name -ErrorAction Stop }
+        catch {
+            $id = $_.FullyQualifiedErrorId
+            if ($id -like 'NoMatchingLogsFound*') { $parts += "$name not present"; continue }
+            # without elevation the Security log reports LogInfoUnavailable
+            if ($id -like 'LogInfoUnavailable*' -or $_.Exception -is [System.UnauthorizedAccessException]) { $parts += "$name unreadable"; $issues += "$name not readable (run elevated)"; continue }
+            throw
+        }
+        $mb = [math]::Round($log.MaximumSizeInBytes / 1MB)
+        $parts += "$name $mb MB$(if (-not $log.IsEnabled) { ' (disabled)' })"
+        if (-not $log.IsEnabled) { $issues += "$name disabled" }
+        elseif ($log.MaximumSizeInBytes -lt [int64]$targets[$name] * 1MB) { $issues += "$name $mb MB < $($targets[$name]) MB" }
+    }
+    $ev = "$($parts -join '; ')."
+    if (-not $issues) { return New-Finding Pass $ev }
+    New-Finding Warn "$ev $($issues -join '; ')." 'Raise the maximum size (Event Viewer > log properties, or the Event Log policies): Security 256 MB, PowerShell/Operational 128 MB, Defender/Operational 64 MB.'
+}
+
+Invoke-Check -Id 'LOG-05' -Category 'Logging' -Title 'Process creation auditing on (event 4688)' -Severity 'Medium' -Weight 3 -RequiresAdmin -Body {
+    # Elevation is required: without it, a Security log query returns "no events" instead of access denied.
+    $newest = $null
+    try { $newest = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688 } -MaxEvents 1 -ErrorAction Stop }
+    catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+    $fix = 'auditpol /set /subcategory:{0CCE922B-69AE-11D9-BED3-505054503030} /success:enable (elevated), or the policy "Audit Process Creation". LOG-01 adds the command lines.'
+    if (-not $newest) { return New-Finding Fail 'No event 4688 in the Security log: process creation is not audited.' $fix }
+    $age = (Get-Date) - $newest.TimeCreated
+    $ev = "Newest event 4688: $($newest.TimeCreated.ToString('s')) ($([math]::Round($age.TotalHours, 1)) h ago)."
+    if ($age.TotalHours -le 24) { return New-Finding Pass $ev }
+    New-Finding Warn "$ev Processes start constantly, so auditing was probably turned off since." $fix
 }
 
 # ---------------------------------------------------------------------------

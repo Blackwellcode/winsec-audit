@@ -144,6 +144,22 @@ try {
             if (-not $r.PSObject.Properties[$field]) { $problems.Add("$($r.Id): field '$field' missing") }
         }
     }
+    # every Invoke-Check declared in the script reports exactly once
+    $tokens = $null; $parseErrors = $null
+    $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $audit).Path, [ref]$tokens, [ref]$parseErrors)
+    $declared = @($scriptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Check' }, $true) | ForEach-Object {
+            $els = $_.CommandElements
+            for ($i = 1; $i -lt $els.Count - 1; $i++) {
+                if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and $els[$i].ParameterName -eq 'Id') { $els[$i + 1].Extent.Text.Trim("'", '"') }
+            }
+        })
+    $reported = @($results | ForEach-Object { [string]$_.Id })
+    foreach ($id in $declared) {
+        $n = @($reported | Where-Object { $_ -eq $id }).Count
+        if ($n -ne 1) { $problems.Add("check $id reported $n time(s), expected 1") }
+    }
+    if ($reported.Count -ne $declared.Count) { $problems.Add("$($reported.Count) result(s) for $($declared.Count) declared check(s)") }
+
     $errors = @($results | Where-Object { $_.Status -eq 'Error' })
     foreach ($e in $errors) { Write-Host "  Error in $($e.Id): $($e.Evidence)" -ForegroundColor Yellow }
     if ($errors.Count -gt $MaxErrors) { $problems.Add("$($errors.Count) check(s) ended with Error (max $MaxErrors)") }
