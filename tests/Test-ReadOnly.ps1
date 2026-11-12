@@ -8,7 +8,9 @@
       - file writes (New-Item, Set-Content, redirection) outside Write-Report,
       - '&' invocations outside Invoke-ReadOnlyNative / Invoke-Check,
       - direct calls of *.exe files,
-      - .NET/COM methods that write, delete, start or kill,
+      - Write-* other than Host/Output/Verbose/Warning/Error/Information (e.g. Write-EventLog),
+      - .NET/COM methods that write, copy, move, create, delete, start, stop or kill,
+      - New-Object / ::new() of file and stream types,
       - COM objects outside the allowlist,
       - native arguments that repair, install or configure.
 #>
@@ -24,14 +26,20 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$to
 $violations = New-Object System.Collections.Generic.List[string]
 foreach ($e in @($parseErrors)) { $violations.Add("line $($e.Extent.StartLineNumber): parse error: $($e.Message)") }
 
-$readVerbs = 'Get', 'Test', 'Select', 'Where', 'ForEach', 'Sort', 'Group', 'Measure', 'Format', 'ConvertTo', 'ConvertFrom', 'Join', 'Split', 'Resolve', 'Compare', 'Write', 'Confirm'
-$exact = 'New-Object', 'Add-Member', 'Out-String', 'Out-Null', 'Set-StrictMode', '%', '?', 'where', 'foreach', 'select', 'sort'
+$readVerbs = 'Get', 'Test', 'Select', 'Where', 'ForEach', 'Sort', 'Group', 'Measure', 'Format', 'ConvertTo', 'ConvertFrom', 'Join', 'Split', 'Resolve', 'Compare', 'Confirm'
+# Write-* only for the console streams; Write-EventLog, Write-Progress etc. are not allowed
+$exact = 'New-Object', 'Add-Member', 'Out-String', 'Out-Null', 'Set-StrictMode', '%', '?', 'where', 'foreach', 'select', 'sort',
+'Write-Host', 'Write-Output', 'Write-Verbose', 'Write-Warning', 'Write-Error', 'Write-Information'
 $writeOnlyInReport = 'New-Item', 'Set-Content'
 $nativeHosts = 'Invoke-ReadOnlyNative', 'Invoke-Check'
 $comAllow = 'Microsoft.Update.AutoUpdate', 'Shell.Application', 'WScript.Shell'
 $denyMethods = 'Delete', 'DeleteSubKey', 'DeleteSubKeyTree', 'DeleteValue', 'SetValue', 'CreateSubKey', 'Kill', 'Start',
 'WriteAllText', 'WriteAllBytes', 'WriteAllLines', 'AppendAllText', 'MoveTo', 'CopyTo', 'Encrypt', 'Decrypt', 'SetAccessControl',
-'Run', 'Exec', 'RegWrite', 'RegDelete', 'ShellExecute', 'InvokeVerb', 'Save', 'InvokeMethod', 'Put'
+'Run', 'Exec', 'RegWrite', 'RegDelete', 'ShellExecute', 'InvokeVerb', 'Save', 'InvokeMethod', 'Put',
+'Create', 'Copy', 'Move', 'Replace', 'OpenWrite', 'CreateDirectory', 'Stop', 'Terminate', 'ChangeStartMode', 'Remove'
+# .NET types that open or create files/streams (exceptions such as FileNotFoundException are fine)
+$denyTypes = '(?i)(Stream|Writer|File|Directory)'
+$allowTypes = '(?i)Exception$'
 $denyArgs = '(?i)^(/scannow|/restorehealth|/startcomponentcleanup|/enable-feature|/disable-feature|/set|/delete|/offline|install|uninstall|upgrade --all|--all|-on|-off|-forceuninstall|/f|-force)$'
 
 $functions = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object Name)
@@ -63,11 +71,24 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
     }
     if ($name -eq 'New-Object') {
         $els = $c.CommandElements
-        for ($i = 0; $i -lt $els.Count - 1; $i++) {
-            if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and $els[$i].ParameterName -eq 'ComObject') {
-                $val = $els[$i + 1].Extent.Text.Trim("'", '"')
-                if ($val -notin $comAllow) { $violations.Add("line ${line}: COM object '$val' not allowlisted") }
+        $typeName = $null
+        $isCom = $false
+        for ($i = 1; $i -lt $els.Count; $i++) {
+            if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst]) {
+                if ($els[$i].ParameterName -eq 'Strict' -or $i + 1 -ge $els.Count) { continue }
+                if ($els[$i].ParameterName -eq 'ComObject') {
+                    $isCom = $true
+                    $val = $els[$i + 1].Extent.Text.Trim("'", '"')
+                    if ($val -notin $comAllow) { $violations.Add("line ${line}: COM object '$val' not allowlisted") }
+                }
+                elseif ($els[$i].ParameterName -eq 'TypeName') { $typeName = $els[$i + 1].Extent.Text }
+                $i++
             }
+            elseif (-not $typeName) { $typeName = $els[$i].Extent.Text }
+        }
+        if (-not $isCom -and $typeName) {
+            $typeName = ($typeName.Trim("'", '"') -split '[\(\[]')[0]
+            if ($typeName -match $denyTypes -and $typeName -notmatch $allowTypes) { $violations.Add("line ${line}: New-Object of file/stream type '$typeName'") }
         }
         continue
     }
@@ -81,6 +102,11 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
 foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
     $member = $m.Member.Extent.Text.Trim("'", '"')
     if ($member -in $denyMethods) { $violations.Add("line $($m.Extent.StartLineNumber): method '$member' can change state") }
+    # [IO.StreamWriter]::new(...) and similar constructors
+    if ($m.Static -and $member -eq 'new' -and $m.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) {
+        $typeName = $m.Expression.TypeName.FullName
+        if ($typeName -match $denyTypes -and $typeName -notmatch $allowTypes) { $violations.Add("line $($m.Extent.StartLineNumber): constructor of file/stream type '$typeName'") }
+    }
 }
 
 # 3) redirection to files
