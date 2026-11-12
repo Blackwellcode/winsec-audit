@@ -3,7 +3,7 @@
     winsec-audit - read-only security audit for Windows 10/11 workstations.
 
 .DESCRIPTION
-    Runs ~40 checks (patching, Microsoft Defender, firewall, network exposure, accounts,
+    Runs 44 checks (patching, Microsoft Defender, firewall, network exposure, accounts,
     boot integrity, logging, persistence, software updates, system integrity) and writes
     report.md and report.json. The script never changes system state; tests/Test-ReadOnly.ps1
     enforces that on every commit. Without elevation, admin-only checks are reported as Skipped.
@@ -48,11 +48,13 @@ $script:IsAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Prin
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # The only external programs this tool may start, with fixed arguments. Nothing else is executed.
+# Programs are never resolved through PATH: System32 tools by fixed path, winget from the
+# App Installer package with a verified Microsoft signature (see Resolve-NativeCommand).
 $script:NativeCommands = @{
-    TpmInfo    = @{ Exe = 'tpmtool.exe'; Args = @('getdeviceinformation') }
-    WingetList = @{ Exe = 'winget.exe'; Args = @('upgrade', '--include-unknown', '--disable-interactivity') }
-    DismScan   = @{ Exe = 'dism.exe'; Args = @('/Online', '/Cleanup-Image', '/ScanHealth') }
-    SfcVerify  = @{ Exe = 'sfc.exe'; Args = @('/verifyonly') }
+    TpmInfo    = @{ Exe = 'tpmtool.exe'; Location = 'System32'; Args = @('getdeviceinformation') }
+    WingetList = @{ Exe = 'winget.exe'; Location = 'AppInstaller'; Args = @('upgrade', '--include-unknown', '--disable-interactivity') }
+    DismScan   = @{ Exe = 'dism.exe'; Location = 'System32'; Args = @('/Online', '/Cleanup-Image', '/ScanHealth') }
+    SfcVerify  = @{ Exe = 'sfc.exe'; Location = 'System32'; Args = @('/verifyonly') }
 }
 
 # ---------------------------------------------------------------------------
@@ -146,14 +148,36 @@ function Get-SignatureState([string]$Path) {
     return $script:SigCache[$k]
 }
 
+function Resolve-NativeCommand($Spec) {
+    if ($Spec.Location -eq 'System32') {
+        # 32-bit PowerShell on 64-bit Windows sees a redirected System32; Sysnative is the real one
+        $dir = 'System32'
+        if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { $dir = 'Sysnative' }
+        $path = Join-Path (Join-Path $env:SystemRoot $dir) $Spec.Exe
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-Object System.IO.FileNotFoundException("$path not found")) }
+        return $path
+    }
+    # winget.exe on PATH is a per-user execution alias (reparse point, not signable) and any folder
+    # earlier in PATH could shadow it. Use the binary inside the App Installer package instead.
+    $pkg = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop) | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $pkg -or -not $pkg.InstallLocation) { throw (New-Object System.IO.FileNotFoundException('App Installer (winget) is not installed')) }
+    $path = Join-Path $pkg.InstallLocation $Spec.Exe
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-Object System.IO.FileNotFoundException("$path not found")) }
+    $sig = Get-AuthenticodeSignature -LiteralPath $path
+    $subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' }
+    if ($sig.Status -ne 'Valid' -or $subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+        throw (New-Object System.Security.SecurityException("$path is not validly signed by Microsoft ($($sig.Status); $subject)"))
+    }
+    return $path
+}
+
 function Invoke-ReadOnlyNative {
     param([Parameter(Mandatory)][ValidateSet('TpmInfo', 'WingetList', 'DismScan', 'SfcVerify')][string]$Key)
     $spec = $script:NativeCommands[$Key]
-    $exe = Get-Command -Name $spec.Exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $exe) { throw (New-Object System.IO.FileNotFoundException("$($spec.Exe) not found")) }
+    $exe = Resolve-NativeCommand $spec
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'   # native stderr must not abort the check
-    try { $out = & $exe.Source @($spec.Args) 2>&1 }
+    try { $out = & $exe @($spec.Args) 2>&1 }
     finally { $ErrorActionPreference = $prev }
     [pscustomobject]@{
         ExitCode = $LASTEXITCODE
@@ -305,11 +329,12 @@ Invoke-Check -Id 'DEF-06' -Category 'Defender' -Title 'No Defender exclusions' -
 
 Invoke-Check -Id 'DEF-07' -Category 'Defender' -Title 'No active threats' -Severity 'Critical' -Weight 6 -Body {
     Assert-Defender
-    $threats = @(Get-MpThreat -ErrorAction SilentlyContinue)
+    # -ErrorAction Stop: a failed query must end as Error, never as "no threats" (Pass)
+    $threats = @(Get-MpThreat -ErrorAction Stop)
     $names = @{}; foreach ($t in $threats) { $names[[string]$t.ThreatID] = $t.ThreatName }
     $active = @($threats | Where-Object { $_.IsActive })
     $since = (Get-Date).AddDays(-30)
-    $recent = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.InitialDetectionTime -gt $since } | ForEach-Object {
+    $recent = @(Get-MpThreatDetection -ErrorAction Stop | Where-Object { $_.InitialDetectionTime -gt $since } | ForEach-Object {
             $n = $names[[string]$_.ThreatID]; if (-not $n) { $n = "ThreatID $($_.ThreatID)" }
             "$($_.InitialDetectionTime.ToString('yyyy-MM-dd')) $n (remediated: $($_.ActionSuccess))"
         })
